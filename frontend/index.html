@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Todo List with Auth</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .auth-container,
+        .todo-container {
+            margin-top: 20px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        .todo-item {
+            padding: 10px;
+            border: 1px solid #ddd;
+            margin: 5px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .form-group {
+            margin: 10px 0;
+        }
+
+        button {
+            padding: 5px 10px;
+            margin: 0 5px;
+            cursor: pointer;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 100px;
+        }
+
+        input {
+            padding: 5px;
+            margin: 5px 0;
+            width: 100%;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .user-info {
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Phần đăng nhập/đăng ký -->
+    <div id="authSection" class="auth-container">
+        <h2>Login / Register</h2>
+        <div class="form-group">
+            <input type="text" id="loginUsername" placeholder="Username">
+            <input type="password" id="loginPassword" placeholder="Password">
+            <button onclick="login()">Login</button>
+            <button onclick="showRegister()">Register</button>
+        </div>
+
+        <div id="registerForm" class="hidden">
+            <h3>Register</h3>
+            <input type="text" id="registerUsername" placeholder="Username">
+            <input type="password" id="registerPassword" placeholder="Password">
+            <button onclick="register()">Register</button>
+            <button onclick="hideRegister()">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Phần todo list (chỉ hiển thị sau khi đăng nhập) -->
+    <div id="appSection" class="hidden">
+        <div class="user-info">
+            Welcome, <span id="usernameDisplay"></span>!
+            <button onclick="logout()" style="float: right;">Logout</button>
+        </div>
+
+        <h1>Todo List</h1>
+
+        <!-- Form thêm/sửa -->
+        <div class="form-group">
+            <input type="hidden" id="noteId">
+            <textarea id="detailedNote" placeholder="Enter your note"></textarea>
+            <button onclick="saveNote()">Save</button>
+            <button onclick="clearForm()">Clear</button>
+        </div>
+
+        <!-- Danh sách todo -->
+        <div class="todo-container" id="todoList"></div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8080/v1';
+        let currentToken = null;
+        let currentUserId = null;
+
+        // Hiển thị form đăng ký
+        function showRegister() {
+            document.getElementById('registerForm').classList.remove('hidden');
+        }
+
+        // Ẩn form đăng ký
+        function hideRegister() {
+            document.getElementById('registerForm').classList.add('hidden');
+        }
+
+        // Đăng ký user mới
+        async function register() {
+            const username = document.getElementById('registerUsername').value;
+            const password = document.getElementById('registerPassword').value;
+
+            if (!username || !password) {
+                alert('Please fill all fields');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/register`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        username: username,
+                        password: password
+                    })
+                });
+
+                const result = await response.json();
+                if (response.ok) {
+                    alert('Registration successful! Please login.');
+                    hideRegister();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Registration error:', error);
+                alert('Registration failed');
+            }
+        }
+
+        // Đăng nhập
+        async function login() {
+            const username = document.getElementById('loginUsername').value;
+            const password = document.getElementById('loginPassword').value;
+
+            if (!username || !password) {
+                alert('Please fill all fields');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        username: username,
+                        password: password
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const result = await response.json();
+                if (response.ok) {
+                    currentToken = result.token;
+                    currentUserId = result.user_id;
+
+                    // Ẩn phần auth, hiển thị app
+                    document.getElementById('authSection').classList.add('hidden');
+                    document.getElementById('appSection').classList.remove('hidden');
+
+                    // Hiển thị username
+                    document.getElementById('usernameDisplay').textContent = username;
+
+                    // Lấy danh sách todo
+                    fetchNotes();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Login error:', error);
+                alert('Login failed');
+            }
+        }
+
+        // Đăng xuất
+        function logout() {
+            currentToken = null;
+            currentUserId = null;
+
+            // Ẩn app, hiển thị auth
+            document.getElementById('appSection').classList.add('hidden');
+            document.getElementById('authSection').classList.remove('hidden');
+
+            // Xóa form
+            clearForm();
+        }
+
+        // Lấy danh sách notes
+        async function fetchNotes() {
+            try {
+                const response = await fetch(`${API_URL}/notes`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentToken}`
+                    }
+                });
+
+                const result = await response.json();
+                if (response.ok) {
+                    displayNotes(result.data);
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Fetch notes error:', error);
+                alert('Failed to fetch notes');
+            }
+        }
+
+        // Hiển thị notes
+        function displayNotes(notes) {
+            const todoList = document.getElementById('todoList');
+            todoList.innerHTML = '';
+
+            notes.forEach(note => {
+                const div = document.createElement('div');
+                div.className = 'todo-item';
+                div.innerHTML = `
+                    <div>
+                        <strong>ID: ${note.id}</strong> - ${note.detailed_note}
+                        <br>Created: ${new Date(note.created_at).toLocaleString()}
+                    </div>
+                    <div>
+                        <button onclick="editNote(${note.id}, '${note.detailed_note.replace(/'/g, "\\'")}')">Edit</button>
+                        <button onclick="deleteNote(${note.id})">Delete</button>
+                    </div>
+                `;
+                todoList.appendChild(div);
+            });
+        }
+
+        // Lưu note (tạo mới hoặc cập nhật)
+        async function saveNote() { // async: kiểu hàm này cho phép dùng await bên trong
+            const noteId = document.getElementById('noteId').value; // document.getElementById('noteId'): Tìm phần tử HTML có id="noteId"
+                                                                    // .value: Lấy giá trị của phần tử đó
+                                                                    // noteId: Sẽ là:Chuỗi rỗng ("") nếu tạo note mới. Giá trị ID (ví dụ: "123") nếu sửa note cũ.
+            const detailedNote = document.getElementById('detailedNote').value;
+
+            if (!detailedNote) {// nếu detailedNote trống thì in ra yêu cầu ghi nội dung note
+                alert('Please fill the note content');
+                return; // dừng hàm, ko thực hiện bên dưới
+            }
+
+            const noteData = {// tạo  object noteData với: Key detailed_note: Khớp với tên trường trong backend (tên trường trong struct Note). Value: Giá trị lấy từ detailedNote.
+                              // dùng để guiẻ lên server
+                detailed_note: detailedNote // detailedNote này là tên trường nhập dữ liệu trong form, trường mà nhập nội dung node
+            };
+
+            try {
+                let response;// Khai báo biến response để lưu kết quả từ API.
+                if (noteId) { // chia ra 2 trường hợp là 1 cái sửa một cái tạo mới
+                    // nếu là cập nhật note
+                    response = await fetch(`${API_URL}/notes/${noteId}`, { // gọi api cập nhật PUT
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',// báo là gửi dữ liệu kiểu JSON 
+                            'Authorization': `Bearer ${currentToken}` // gửi kem jwt token 
+                        },
+                        body: JSON.stringify(noteData) // Chuyển noteData thành chuỗi JSON để gửi đi.
+                    });
+                } else {
+                    // Tạo note mới
+                    response = await fetch(`${API_URL}/notes`, { // gọi api tạo 
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${currentToken}`
+                        },
+                        body: JSON.stringify(noteData)
+                    });
+                }
+                // đọc kết quả gửi từ server về
+
+                const result = await response.json();// vì server trả dạng json nên phải chuyển sang object javascript 
+                                                     //response.json(): Chuyển dữ liệu trả về từ API (dạng JSON) thành object JavaScript.
+                if (response.ok) {// trường hợp tạo thahf công
+                    // nếu server trả về response.ok thì xóa form và gọi hàm fetchNotes() để tải lại danh sách note   
+                    clearForm();
+                    fetchNotes();
+                } else {// th không tạo mới được
+                    // Xử lý lỗi giới hạn todo
+                    if (response.status === 403 && result.error && result.error.includes("daily limit")) {// dấu && có nghãi chúng là những điều kiện phải đồng thời xảy ra 
+                        /*response.status: Là HTTP status code từ server trả về. 403 có nghĩa là "Forbidden" (truy cập bị từ chối). Bị từ chối 
+                        truy cập tạo note mới bởi vì đã đến giới hạn tạo hàng ngày.
+
+                        result.error : Là message lỗi mà backend trả về khi gặp trường hợp chạm đến giới hạn todo ( "error": "You have reached your daily limit for creating notes" , "limit": user.LimitPerDay, "used":  count,")
+
+                        result.error.includes("daily limit") 
+                        includes("daily limit"):
+                        Kiểm tra xem chuỗi result.error có chứa cụm từ "daily limit" không.
+                        Mục đích: Xác định đây có phải là lỗi vượt giới hạn note/ngày không (thay vì lỗi khác).*/
+                        alert(`Bạn chỉ được tạo giới hạn (${result.limit} todo). Bạn đã tạo ${result.used} todo hôm nay.`); // thông báo ra màn hinhg
+                    } else { // nếu cả 3 điều kiện bên trên không thỏa mãn -> có nghĩa là không phải lỗi giới hạn ngày
+                        alert('Error: ' + (result.error || 'Lưu thất bại')); // 
+                    }
+                }
+            } catch (error) {
+                console.error('Error saving note:', error);
+                alert('Failed to save note');
+            }
+
+        }
+        // Chỉnh sửa note
+        function editNote(id, detailedNote) {
+            document.getElementById('noteId').value = id;
+            document.getElementById('detailedNote').value = detailedNote;
+        }
+
+        // Xóa note
+        async function deleteNote(id) {
+            if (!confirm('Are you sure you want to delete this note?')) return;
+
+            try {
+                const response = await fetch(`${API_URL}/notes/${id}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Bearer ${currentToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    fetchNotes();
+                } else {
+                    const error = await response.json();
+                    alert('Error: ' + error.error);
+                }
+            } catch (error) {
+                console.error('Error deleting note:', error);
+                alert('Failed to delete note');
+            }
+        }
+
+        // Xóa form
+        function clearForm() {
+            document.getElementById('noteId').value = '';
+            document.getElementById('detailedNote').value = '';
+        }
+    </script>
+</body>
+
+</html>
