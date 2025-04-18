@@ -232,56 +232,88 @@ func getCurrentUser(db *gorm.DB) gin.HandlerFunc {
 
 // Các hàm xử lý note
 
-func createNote(db *gorm.DB) gin.HandlerFunc { // tạo note, và kiểm tra giới hạn. Thỏa mã điều kiện mới cho tạo
+func createNote(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userID := c.MustGet("user_id").(int)
+		userID := c.MustGet("user_id").(int) // c.MustGet("user_id") lấy user id từ context (cái chứa tất cả thông tin của  request/response)
+		// lấy từ c bởi khi hàm authMiddleware() chạy rồi xác thực token thì nó lưu user_id vào context
+		// có thể nói dùng context truyền data của JWT
+		// c.Set("user_id", claims.UserId), Gin lưu giá trị vào context dưới dạng interface{} chứ ko phải int
+		// nên khi lấy ra bằng c.Get() hoặc c.MustGet(), Go trả về interface{} chứ không phải kiểu gốc=> phải ép kiểu bằng .(int)
+		// interface{} là một kiểu dữ liệu đặc biệt, đóng vai trò như một "container" có thể chứa mọi giá trị thuộc bất kỳ kiểu dữ liệu nào.
 
-		// Lấy thông tin user để kiểm tra limit_per_day
-		var user User // khai báo biến user kiểu struct User
-		if err := db.First(&user, userID).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user information"}) // http.StatusInternalServerError: mã lỗi 500- lỗi server
+		// Transaction
+		tx := db.Begin()     // bắt đầu 1 transaction
+		if tx.Error != nil { // nếu khởi tạo tx lỗi thfi trả về JSON bên dưới rồi kết thcú
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
 			return
 		}
 
-		// Kiểm tra giới hạn nếu limit_per_day, chỉ kiểm tra khi nó > 0
+		// Lấy thông tin user với lock để tránh race condition
+		var user User                                                                                // kha báo user từ struct User
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&user, userID).Error; err != nil { /* FOR UPDATE: khóa bản ghi lại, các transaction khác muốn đọc hay ghi
+			    phải chờ transaction trước kết thúc mới có thể đọc hay ghi được
+				tx.Set("gorm:query_option", "FOR UPDATE").First(&user, userID) -> SELECT * FROM users WHERE id = [userID] FOR UPDATE LIMIT 1
+				First(&user, userID) sẽ chuyển thành WHERE id = [userID] */
+			tx.Rollback() // Rollback khi mà có lỗi ở câu lệnh bên trên và trả về lỗi server 500 kèm json lỗi bên dưới. sau đso kết thúc
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user information"})
+			return
+		}
+
+		// Kiểm tra giới hạn nếu limit_per_day > 0
 		if user.LimitPerDay > 0 {
 			// Tính số todo đã tạo trong ngày
 			var count int64
-			today := time.Now().Format("2006-01-02") // lấy ngày hôm nay
-			if err := db.Model(&Note{}).             // chọn bảng notes để truy vấn (Note là struct của bảng notes)
-									Where("user_id = ? AND DATE(created_at) = ?", userID, today). // đếm số xuất hiện user_id trong ngày hôm nay (today)
-									Count(&count).Error; err != nil {                             // đếm rồi lưu vào count
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count today's notes"}) // gin.H{"error": "Failed to count today's notes"} sẽ trả về JSON {"error": "Failed to count today's notes"}
-				return
+			today := time.Now().Format("2006-01-02")
+			if err := tx.Model(&Note{}). /* ở đây dùng transacton khi truy vấn bảng notes để:
+				Lỡ 2 request gửi tới 1 lúc, mà cái đầu nó chưa tạo note xong -> 2 cái đều đọc đc điều kiện là 4 -> bé hơn 5
+				=> nó tạo 2 cái luôn thành ra một ngày dã tạo 6 cái note
+				Nhưng do bên trên đã dùng transaction conngj thêm For Update nên chuyện cái thứ 2 cũng nhảy vào đọc được là không thể
+				-> ngăn chặn chuyện tạo được note thứ 6 */
+
+				Where("user_id = ? AND DATE(created_at) = ?", userID, today). // đếm của user hiện tại được lưu trong context và ngày hiện tại
+				Count(&count).Error; err != nil {                             // đếm và gán vào count, nếu có lỗi gì thì Rollback và báo lỗi 500 kèm json bên dưới
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count today's notes"})
+				return // kết thúc
 			}
 
 			// Kiểm tra giới hạn
-			if count >= int64(user.LimitPerDay) { // nếu todo tạo hôm nay >= limit thì trả về
-				c.JSON(http.StatusForbidden, gin.H{ // tạo 1 json trả về bên frontend trong thông báo một JSON chưa các key và value, khi bên backend thấy vượt quá giới hạn, sẽ gửi json này cho bên frontend để in ra  những thứ được ghi trong json này
+			if count >= int64(user.LimitPerDay) {
+				tx.Rollback() // nếu lớn hơn thì Rollback xong trả về json
+				c.JSON(http.StatusForbidden, gin.H{
 					"error": "You have reached your daily limit for creating notes",
-					"limit": user.LimitPerDay, // giới hạn
-					"used":  count,            // đã tạo hôm nay
+					"limit": user.LimitPerDay,
+					"used":  count,
 				})
 				return
 			}
 		}
 
-		var dataNote Note                               // khai báo biến dataNote từ kiểu dữ liệu  Note (Note là 1 struct)
-		if err := c.ShouldBind(&dataNote); err != nil { // ShouldBind đưa dữ liệu từ body request vào dataNote, từ trong JSON gán vào các trường tương ứng bên trong
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}) // http.StatusBadRequest lỗi 400, gửi request không hợp lệ
+		var dataNote Note                               // tạo dataNote từ struct Note
+		if err := c.ShouldBind(&dataNote); err != nil { // dán dữ liệu từ request body vào dataNote, nếu có lỗi thì
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		dataNote.DetailedNote = strings.TrimSpace(dataNote.DetailedNote) // strings.TrimSpace() là hàm trong Go để xóa các khoảng trắng (dấu cách, tab, xuống dòng) ở đầu và cuối chuỗi.
-		if dataNote.DetailedNote == "" {                                 // nếu DetailedNote, cái mình nhập vào mà trống thì báo không được trống
+		dataNote.DetailedNote = strings.TrimSpace(dataNote.DetailedNote) // xóa khoảng trắng thừa
+		if dataNote.DetailedNote == "" {                                 // kiểm tra nếu không ghi nội dung note thì Rollback và trả json
+			tx.Rollback()
 			c.JSON(http.StatusBadRequest, gin.H{"error": "detailed_note cannot be blank"})
 			return
 		}
 
-		dataNote.UserId = userID
+		dataNote.UserId = userID // gán user id cho note này
 
-		if err := db.Create(&dataNote).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if err := tx.Create(&dataNote).Error; err != nil { // lưu vào database, thực hiện lệnh insert và lưu kết quả vào transaction log
+			tx.Rollback()                                              // nếu có lỗi
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}) //err.Error() trả về chuối mô tả lỗi
+			return
+		}
+
+		// Commit transaction nếu bên trên chạy mượt không lỗi gì
+		if err := tx.Commit().Error; err != nil { // xác nhận transaction thành công, lưu tất cả thay đổi vào database nếu không có lỗi
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
 			return
 		}
 
